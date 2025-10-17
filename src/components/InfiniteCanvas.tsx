@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import * as PIXI from 'pixi.js';
 import { Assets } from 'pixi.js';
 import { EditorState, Tool } from '@/app/page';
+import GeminiImagePrompt from './GeminiImagePrompt';
 
 class DraggableResizable extends PIXI.Container {
   sprite: PIXI.Sprite;
@@ -282,27 +283,27 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
   const appRef = useRef<PIXI.Application | null>(null);
   const containerRef = useRef<PIXI.Container | null>(null);
   const [images, setImages] = useState<DraggableImage[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
   const [selectedImage, setSelectedImage] = useState<DraggableImage | null>(null);
   const selectedImageRef = useRef<DraggableImage | null>(null);
   const saveDebounceRef = useRef<number | null>(null);
+  const [showGeminiPrompt, setShowGeminiPrompt] = useState(false);
+  const saveToAPIRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const debouncedAutoSaveRef = useRef<() => void>(() => {});
+  const handleImageDoubleClickRef = useRef<(imageId: string) => void>(() => {});
+  const handleDeleteImageRef = useRef<(imageId: string) => void>(() => {});
 
-  // Keep selectedImageRef in sync with selectedImage state
-  useEffect(() => {
-    selectedImageRef.current = selectedImage;
-  }, [selectedImage]);
 
-  const debouncedAutoSave = () => {
+  const debouncedAutoSave = useCallback(() => {
     if (saveDebounceRef.current) {
       window.clearTimeout(saveDebounceRef.current);
     }
     // Debounce saves to avoid excessive POSTs while interacting
     saveDebounceRef.current = window.setTimeout(() => {
       if (images.length > 0) {
-        saveToAPI();
+        saveToAPIRef.current?.();
       }
     }, 2000);
-  };
+  }, [images.length]);
 
   // Store currentTool and editorState in refs to avoid recreating the entire canvas
   const currentToolRef = useRef<Tool>(currentTool);
@@ -379,7 +380,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
           lastPointerPosition = { x: pointer.x, y: pointer.y };
           
           // Auto-save canvas position changes (debounced)
-          debouncedAutoSave();
+          debouncedAutoSaveRef.current?.();
         }
       });
 
@@ -472,7 +473,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
 
         setImages(prev => prev.map(img => img.id === selected.id ? { ...img, scale: clamped } : img));
         setSelectedImage(si => si && si.id === selected.id ? { ...si, scale: clamped } : si);
-        debouncedAutoSave();
+        debouncedAutoSaveRef.current?.();
       };
       
       if (canvasElement) {
@@ -507,6 +508,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
         appRef.current.destroy(true);
       }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty dependency array - only initialize once
 
   const addTextAtPosition = (text: string, x: number, y: number, editorState: EditorState) => {
@@ -528,7 +530,105 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     containerRef.current.addChild(pixiText);
   }
 
-  const addImageAtPosition = async (imageUrl: string, x: number, y: number) => {
+  const createSpriteFromTexture = useCallback((texture: PIXI.Texture, x: number, y: number, imageUrl: string) => {
+    try {
+      console.log('Creating sprite from texture:', { 
+        imageUrl: imageUrl.substring(0, 100) + '...', 
+        x, 
+        y, 
+        textureValid: !!texture 
+      });
+      
+      const id = Date.now().toString();
+      const node = new DraggableResizable(texture, id);
+
+      // Position the node at pixel-perfect coordinates for crisp rendering
+      node.x = Math.round(x);
+      node.y = Math.round(y);
+      
+      // Hide selection by default
+      node.hideSelection();
+      
+      // Add click handler for selection and double-click for Gemini prompt
+      let clickTimeout: number | null = null;
+      node.sprite.on('pointerdown', (event) => {
+        event.stopPropagation(); // Prevent container click event
+        
+        // Clear any existing timeout
+        if (clickTimeout) {
+          clearTimeout(clickTimeout);
+          clickTimeout = null;
+          // This is a double-click
+          handleImageDoubleClickRef.current?.(id);
+          return;
+        }
+        
+        // Set timeout for single click
+        clickTimeout = window.setTimeout(() => {
+          // Hide selection for previously selected image
+          if (selectedImage?.node && selectedImage.id !== id) {
+            selectedImage.node.hideSelection();
+          }
+          
+          // Show selection for newly selected image
+          node.showSelection();
+          setSelectedImage({
+            id,
+            node,
+            x: node.x,
+            y: node.y,
+            scale: node.getScale(),
+            imageUrl
+          });
+          clickTimeout = null;
+        }, 300);
+      });
+
+      if (containerRef.current) {
+        containerRef.current.addChild(node);
+      }
+
+      const newImage: DraggableImage = {
+        id,
+        node,
+        x: node.x,
+        y: node.y,
+        scale: node.getScale(),
+        imageUrl
+      };
+
+      console.log('Created new image:', { 
+        id, 
+        imageUrl: imageUrl.substring(0, 100) + '...', 
+        x: node.x, 
+        y: node.y 
+      });
+
+      setImages(prev => {
+        const updated = [...prev, newImage];
+        console.log('Updated images array:', updated.length, 'images');
+        return updated;
+      });
+
+      // Listen for node resize and move events to persist state
+      // Use once: false to ensure these handlers stay attached
+      node.on('resized', (scale: number) => {
+        setImages(prev => prev.map(img => img.id === id ? { ...img, scale } : img));
+        setSelectedImage(si => si && si.id === id ? { ...si, scale } as DraggableImage : si);
+        debouncedAutoSaveRef.current?.();
+      });
+      node.on('moved', ({ x, y }: { x: number; y: number }) => {
+        setImages(prev => prev.map(img => img.id === id ? { ...img, x, y } : img));
+        setSelectedImage(si => si && si.id === id ? { ...si, x, y } as DraggableImage : si);
+        debouncedAutoSaveRef.current?.();
+      });
+      
+    } catch (error) {
+      console.error('Error creating sprite:', error);
+    }
+  }, [selectedImage]);
+
+  const addImageAtPosition = useCallback(async (imageUrl: string, x: number, y: number) => {
     if (!appRef.current || !containerRef.current) {
       console.error('App or container not initialized');
       return;
@@ -572,97 +672,13 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
         console.error('Fallback texture creation failed:', fallbackError);
       }
     }
-  };
-
-  const createSpriteFromTexture = (texture: PIXI.Texture, x: number, y: number, imageUrl: string) => {
-    try {
-      console.log('Creating sprite from texture:', { 
-        imageUrl: imageUrl.substring(0, 100) + '...', 
-        x, 
-        y, 
-        textureValid: !!texture 
-      });
-      
-      const id = Date.now().toString();
-      const node = new DraggableResizable(texture, id);
-
-      // Position the node at pixel-perfect coordinates for crisp rendering
-      node.x = Math.round(x);
-      node.y = Math.round(y);
-      
-      // Hide selection by default
-      node.hideSelection();
-      
-      // Add click handler for selection
-      node.sprite.on('pointerdown', (event) => {
-        event.stopPropagation(); // Prevent container click event
-        
-        // Hide selection for previously selected image
-        if (selectedImage?.node && selectedImage.id !== id) {
-          selectedImage.node.hideSelection();
-        }
-        
-        // Show selection for newly selected image
-        node.showSelection();
-        setSelectedImage({
-          id,
-          node,
-          x: node.x,
-          y: node.y,
-          scale: node.getScale(),
-          imageUrl
-        });
-      });
-
-      if (containerRef.current) {
-        containerRef.current.addChild(node);
-      }
-
-      const newImage: DraggableImage = {
-        id,
-        node,
-        x: node.x,
-        y: node.y,
-        scale: node.getScale(),
-        imageUrl
-      };
-
-      console.log('Created new image:', { 
-        id, 
-        imageUrl: imageUrl.substring(0, 100) + '...', 
-        x: node.x, 
-        y: node.y 
-      });
-
-      setImages(prev => {
-        const updated = [...prev, newImage];
-        console.log('Updated images array:', updated.length, 'images');
-        return updated;
-      });
-
-      // Listen for node resize and move events to persist state
-      // Use once: false to ensure these handlers stay attached
-      node.on('resized', (scale: number) => {
-        setImages(prev => prev.map(img => img.id === id ? { ...img, scale } : img));
-        setSelectedImage(si => si && si.id === id ? { ...si, scale } as DraggableImage : si);
-        debouncedAutoSave();
-      });
-      node.on('moved', ({ x, y }: { x: number; y: number }) => {
-        setImages(prev => prev.map(img => img.id === id ? { ...img, x, y } : img));
-        setSelectedImage(si => si && si.id === id ? { ...si, x, y } as DraggableImage : si);
-        debouncedAutoSave();
-      });
-      
-    } catch (error) {
-      console.error('Error creating sprite:', error);
-    }
-  };
+  }, [createSpriteFromTexture]);
 
 
 
 
 
-  const saveToAPI = async () => {
+  const saveToAPI = useCallback(async () => {
     if (!containerRef.current) return;
 
     console.log('All images before saving:', images);
@@ -712,7 +728,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     } catch (error) {
       console.error('Error saving canvas data:', error);
     }
-  };
+  }, [images, containerRef]);
 
   const loadCanvasData = async (canvasData: CanvasData) => {
     // Clear existing images
@@ -776,8 +792,10 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
         }
 
         // Enable mipmapping for smooth scaling at all zoom levels
-        texture.source.autoGenerateMipmaps = true;
-        texture.source.scaleMode = 'linear';
+        if (texture && texture.source) {
+          texture.source.autoGenerateMipmaps = true;
+          texture.source.scaleMode = 'linear';
+        }
 
         // Create the draggable resizable node
         const node = new DraggableResizable(texture, storedImage.id);
@@ -853,7 +871,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     event.target.value = '';
   };
 
-  const loadFromAPI = async () => {
+  const loadFromAPI = useCallback(async () => {
     try {
       const response = await fetch('/api/canvas');
       if (!response.ok) {
@@ -897,8 +915,10 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
             texture = await Assets.load(storedImage.imageUrl);
 
             // Enable mipmapping for smooth scaling at all zoom levels
-            texture.source.autoGenerateMipmaps = true;
-            texture.source.scaleMode = 'linear';
+            if (texture && texture.source) {
+              texture.source.autoGenerateMipmaps = true;
+              texture.source.scaleMode = 'linear';
+            }
           } catch (e) {
             console.error('Failed to load texture via Assets:', e);
           }
@@ -913,58 +933,80 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
           const node = new DraggableResizable(texture, storedImage.id);
 
           // Position the node at pixel-perfect coordinates for crisp rendering
-          node.x = Math.round(storedImage.x);
-          node.y = Math.round(storedImage.y);
-          node.setScale(storedImage.scale);
+          if (node) {
+            node.x = Math.round(storedImage.x);
+            node.y = Math.round(storedImage.y);
+            node.setScale(storedImage.scale);
+          }
           
           // Hide selection by default
-          node.hideSelection();
-          
-          // Add click handler for selection
-          node.sprite.on('pointerdown', (event) => {
-            event.stopPropagation();
+          if (node) {
+            node.hideSelection();
             
-            if (selectedImage?.node && selectedImage.id !== storedImage.id) {
-              selectedImage.node.hideSelection();
+            // Add click handler for selection and double-click for Gemini prompt
+            let clickTimeout: number | null = null;
+            node.sprite.on('pointerdown', (event) => {
+            event.stopPropagation(); // Prevent container click event
+            
+            // Clear any existing timeout
+            if (clickTimeout) {
+              clearTimeout(clickTimeout);
+              clickTimeout = null;
+              // This is a double-click
+              handleImageDoubleClickRef.current?.(storedImage.id);
+              return;
             }
             
-            node.showSelection();
-            setSelectedImage({
+            // Set timeout for single click
+            clickTimeout = window.setTimeout(() => {
+              // Hide selection for previously selected image
+              if (selectedImage?.node && selectedImage.id !== storedImage.id) {
+                selectedImage.node.hideSelection();
+              }
+              
+              // Show selection for newly selected image
+              node.showSelection();
+              setSelectedImage({
+                id: storedImage.id,
+                node,
+                x: node.x,
+                y: node.y,
+                scale: node.getScale(),
+                imageUrl: storedImage.imageUrl
+              });
+              clickTimeout = null;
+            }, 300);
+            });
+          }
+          
+          if (containerRef.current && node) {
+            containerRef.current.addChild(node);
+          }
+          
+          if (node) {
+            const newImage: DraggableImage = {
               id: storedImage.id,
               node,
               x: node.x,
               y: node.y,
               scale: node.getScale(),
               imageUrl: storedImage.imageUrl
-            });
-          });
+            };
           
-          if (containerRef.current) {
-            containerRef.current.addChild(node);
-          }
-          
-          const newImage: DraggableImage = {
-            id: storedImage.id,
-            node,
-            x: node.x,
-            y: node.y,
-            scale: node.getScale(),
-            imageUrl: storedImage.imageUrl
-          };
-          
-          loadedImages.push(newImage);
+            loadedImages.push(newImage);
 
-          // Listen for node resize and move events to persist state
-          node.on('resized', (scale: number) => {
-            setImages(prev => prev.map(img => img.id === storedImage.id ? { ...img, scale } : img));
-            setSelectedImage(si => si && si.id === storedImage.id ? { ...si, scale } as DraggableImage : si);
-            debouncedAutoSave();
-          });
-          node.on('moved', ({ x, y }: { x: number; y: number }) => {
-            setImages(prev => prev.map(img => img.id === storedImage.id ? { ...img, x, y } : img));
-            setSelectedImage(si => si && si.id === storedImage.id ? { ...si, x, y } as DraggableImage : si);
-            debouncedAutoSave();
-          });
+            // Listen for node resize and move events to persist state
+            node.on('resized', (scale: number) => {
+              setImages(prev => prev.map(img => img.id === storedImage.id ? { ...img, scale } : img));
+              setSelectedImage(si => si && si.id === storedImage.id ? { ...si, scale } as DraggableImage : si);
+              debouncedAutoSaveRef.current?.();
+            });
+            node.on('moved', ({ x, y }: { x: number; y: number }) => {
+              setImages(prev => prev.map(img => img.id === storedImage.id ? { ...img, x, y } : img));
+              setSelectedImage(si => si && si.id === storedImage.id ? { ...si, x, y } as DraggableImage : si);
+              debouncedAutoSaveRef.current?.();
+            });
+          }
         } catch (error) {
           console.error('Error loading image:', storedImage.id, error);
         }
@@ -974,10 +1016,11 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     } catch (error) {
       console.error('Error loading from localStorage:', error);
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerRef]);
 
   // Clean up invalid images
-  const cleanupInvalidImages = () => {
+  const cleanupInvalidImages = useCallback(() => {
     const validImages = images.filter(img => 
       img.imageUrl && 
       typeof img.imageUrl === 'string' && 
@@ -988,31 +1031,135 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
       console.log(`Cleaned up ${images.length - validImages.length} invalid images`);
       setImages(validImages);
     }
-  };
+  }, [images]);
 
   // Auto-save functionality - debounced to avoid excessive saves during interactions
   useEffect(() => {
     if (images.length > 0) {
       debouncedAutoSave();
     }
-  }, [images]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [images.length]); // Only depend on images.length, not the entire images array
 
   // Canvas position changes are already handled by debouncedAutoSave() in the pointermove handler
 
   // Load from API on component mount
   useEffect(() => {
     loadFromAPI();
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   // Clean up invalid images on mount
   useEffect(() => {
     cleanupInvalidImages();
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
+
+  // Handle Gemini image generation
+  const handleGeminiImageGenerated = async (imageUrl: string, x: number, y: number) => {
+    if (!containerRef.current) return;
+    
+    // Convert screen coordinates to container's local coordinate space
+    const globalPoint = new PIXI.Point(x, y);
+    const localPoint = containerRef.current.toLocal(globalPoint);
+    
+    await addImageAtPosition(imageUrl, localPoint.x, localPoint.y);
+  };
+
+  // Handle Gemini image update
+  const handleGeminiImageUpdated = (imageId: string, newImageUrl: string) => {
+    setImages(prev => prev.map(img => 
+      img.id === imageId ? { ...img, imageUrl: newImageUrl } : img
+    ));
+    
+    // Update the selected image if it's the one being updated
+    if (selectedImage?.id === imageId) {
+      setSelectedImage(prev => prev ? { ...prev, imageUrl: newImageUrl } : null);
+    }
+    
+    // Update the PixiJS sprite texture
+    const imageToUpdate = images.find(img => img.id === imageId);
+    if (imageToUpdate?.node) {
+      // Create new texture from the updated image URL
+      try {
+        const texture = PIXI.Texture.from(newImageUrl);
+        imageToUpdate.node.sprite.texture = texture;
+        imageToUpdate.node._redrawFrame();
+      } catch (error) {
+        console.error('Error updating texture:', error);
+      }
+    }
+    
+    debouncedAutoSave();
+  };
+
+  // Handle double-click on image to open Gemini prompt
+  const handleImageDoubleClick = useCallback((imageId: string) => {
+    const foundImage = images.find(img => img.id === imageId);
+    setSelectedImage(foundImage || null);
+    setShowGeminiPrompt(true);
+  }, [images]);
+
+  // Handle deleting an image
+  const handleDeleteImage = useCallback((imageId: string) => {
+    // Remove from PixiJS container
+    const imageToDelete = images.find(img => img.id === imageId);
+    if (imageToDelete?.node && containerRef.current) {
+      containerRef.current.removeChild(imageToDelete.node);
+      imageToDelete.node.destroy();
+    }
+
+    // Remove from images state
+    setImages(prevImages => prevImages.filter(img => img.id !== imageId));
+
+    // Clear selection if this image was selected
+    if (selectedImage?.id === imageId) {
+      setSelectedImage(null);
+    }
+
+    // Auto-save after deletion
+    debouncedAutoSaveRef.current?.();
+  }, [images, selectedImage]);
+
+  // Keep refs in sync
+  useEffect(() => {
+    selectedImageRef.current = selectedImage;
+    saveToAPIRef.current = saveToAPI;
+    debouncedAutoSaveRef.current = debouncedAutoSave;
+    handleImageDoubleClickRef.current = handleImageDoubleClick;
+    handleDeleteImageRef.current = handleDeleteImage;
+  }, [selectedImage, saveToAPI, debouncedAutoSave, handleImageDoubleClick, handleDeleteImage]);
+
+  // Handle keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Handle Escape key to close Gemini prompt
+      if (event.key === 'Escape' && showGeminiPrompt) {
+        setShowGeminiPrompt(false);
+        return;
+      }
+
+      // Handle Delete/Backspace key to delete selected image
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImage && !showGeminiPrompt) {
+        event.preventDefault();
+        handleDeleteImageRef.current?.(selectedImage.id);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showGeminiPrompt, selectedImage]);
 
   return (
     <div className="w-full h-screen relative">
       {/* Control buttons */}
       <div className="absolute top-4 right-4 z-50 flex gap-2">
+        <button 
+          onClick={() => setShowGeminiPrompt(true)}
+          className="bg-purple-500 text-white px-3 py-1 rounded text-sm"
+        >
+          Generate Image
+        </button>
         <button 
           onClick={saveToAPI}
           className="bg-blue-500 text-white px-3 py-1 rounded text-sm"
@@ -1038,6 +1185,17 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
           background: 'transparent'
         }}
       />
+      
+      {/* Gemini Image Prompt */}
+      {showGeminiPrompt && (
+        <GeminiImagePrompt
+          selectedImageId={selectedImage?.id || null}
+          selectedImageUrl={selectedImage?.imageUrl || null}
+          onImageGenerated={handleGeminiImageGenerated}
+          onImageUpdated={handleGeminiImageUpdated}
+          onClose={() => setShowGeminiPrompt(false)}
+        />
+      )}
     </div>
   );
 }
