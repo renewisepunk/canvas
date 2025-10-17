@@ -6,6 +6,312 @@ import { Assets } from 'pixi.js';
 import { EditorState, Tool } from '@/app/page';
 import GeminiImagePrompt from './GeminiImagePrompt';
 
+class DraggableResizableText extends PIXI.Container {
+  text!: PIXI.Text;
+  frame: PIXI.Graphics;
+  handle: PIXI.Graphics;
+  id: string;
+
+  // drag state
+  dragging = false;
+  dragPointerId: number | null = null;
+  dragOffset = new PIXI.Point();
+
+  // resize state
+  resizing = false;
+  resizePointerId: number | null = null;
+  private startProj = 0;  // starting distance from center to pointer
+  private startScale = 1;
+
+  // Bound event handlers for stage-level events (so we can add/remove them)
+  private boundOnResizeMove: (e: PIXI.FederatedPointerEvent) => void;
+  private boundOnResizeEnd: (e: PIXI.FederatedPointerEvent) => void;
+
+  constructor(textContent: string, id: string, fontFamily: string, color: string) {
+    super();
+
+    this.id = id;
+
+    // Bind resize handlers so they can be added/removed from stage
+    this.boundOnResizeMove = this.onResizeMove.bind(this);
+    this.boundOnResizeEnd = this.onResizeEnd.bind(this);
+
+    // Initialize frame and handle first
+    this.frame = new PIXI.Graphics();
+    this.addChild(this.frame);
+
+    this.handle = new PIXI.Graphics();
+    this.addChild(this.handle);
+
+    // Load font for PixiJS if it's a Google Font
+    this.loadFontForPixi(fontFamily).then(() => {
+      console.log('Font loaded, creating PixiJS text with font:', fontFamily);
+      
+      // Text sprite
+      this.text = new PIXI.Text({
+        text: textContent,
+        style: {
+          fontFamily: `"${fontFamily}", Arial, sans-serif`,
+          fontSize: 24,
+          fill: color,
+          align: 'left',
+        }
+      });
+      this.text.anchor.set(0.5); // scale from center
+      this.addChild(this.text);
+
+      // Make text draggable
+      this.text.eventMode = 'static';
+      this.text.cursor = 'grab';
+      this.text.on('pointerdown', this.onDragStart, this);
+      this.text.on('pointerup', this.onDragEnd, this);
+      this.text.on('pointerupoutside', this.onDragEnd, this);
+      this.text.on('pointermove', this.onDragMove, this);
+
+      // Make handle resizable
+      this.handle.eventMode = 'static';
+      this.handle.cursor = 'nwse-resize';
+      this.handle.on('pointerdown', this.onResizeStart, this);
+
+      // Make the entire container interactive for selection
+      this.eventMode = 'static';
+      this.cursor = 'pointer';
+
+      this._redrawFrame();
+      
+      console.log('PixiJS text created successfully');
+    }).catch((error) => {
+      console.error('Failed to load font, using fallback:', error);
+      
+      // Fallback with Arial
+      this.text = new PIXI.Text({
+        text: textContent,
+        style: {
+          fontFamily: 'Arial, sans-serif',
+          fontSize: 24,
+          fill: color,
+          align: 'left',
+        }
+      });
+      this.text.anchor.set(0.5);
+      this.addChild(this.text);
+
+      // Make text draggable
+      this.text.eventMode = 'static';
+      this.text.cursor = 'grab';
+      this.text.on('pointerdown', this.onDragStart, this);
+      this.text.on('pointerup', this.onDragEnd, this);
+      this.text.on('pointerupoutside', this.onDragEnd, this);
+      this.text.on('pointermove', this.onDragMove, this);
+
+      // Make handle resizable
+      this.handle.eventMode = 'static';
+      this.handle.cursor = 'nwse-resize';
+      this.handle.on('pointerdown', this.onResizeStart, this);
+
+      // Make the entire container interactive for selection
+      this.eventMode = 'static';
+      this.cursor = 'pointer';
+
+      this._redrawFrame();
+    });
+  }
+
+  private async loadFontForPixi(fontFamily: string): Promise<void> {
+    console.log('Loading font for PixiJS:', fontFamily);
+    
+    // For Google Fonts, we need to ensure they're loaded for PixiJS
+    if (fontFamily !== 'Roboto' && fontFamily !== 'Arial' && fontFamily !== 'Helvetica' && fontFamily !== 'Times New Roman') {
+      try {
+        // Check if font is already loaded
+        const existingLink = document.querySelector(`link[href*="${fontFamily.replace(/\s+/g, '+')}"]`);
+        if (!existingLink) {
+          console.log('Loading Google Font:', fontFamily);
+          // Load Google Font
+          const fontUrl = `https://fonts.googleapis.com/css2?family=${fontFamily.replace(/\s+/g, '+')}:wght@400&display=swap`;
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = fontUrl;
+          document.head.appendChild(link);
+          
+          // Wait for font to load
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        } else {
+          console.log('Font already loaded, waiting briefly');
+          // Font already loaded, wait a bit
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        
+        // Force font loading by creating a test element
+        const testElement = document.createElement('div');
+        testElement.style.fontFamily = `"${fontFamily}", Arial, sans-serif`;
+        testElement.style.position = 'absolute';
+        testElement.style.left = '-9999px';
+        testElement.style.fontSize = '16px';
+        testElement.textContent = 'Test';
+        document.body.appendChild(testElement);
+        
+        // Wait a bit more for font to be available
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        document.body.removeChild(testElement);
+        console.log('Font loading completed for:', fontFamily);
+      } catch (error) {
+        console.warn('Failed to load Google Font for PixiJS:', fontFamily, error);
+      }
+    } else {
+      console.log('Using system font:', fontFamily);
+      // System font, just wait a bit
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+
+  // ---- Dragging
+  onDragStart(e: PIXI.FederatedPointerEvent): void {
+    this.dragging = true;
+    this.dragPointerId = e.pointerId;
+    const localPos = this.text.toLocal(e.global);
+    this.dragOffset.set(localPos.x, localPos.y);
+  }
+
+  onDragEnd(e: PIXI.FederatedPointerEvent): void {
+    if (this.dragging && this.dragPointerId === e.pointerId) {
+      this.dragging = false;
+      this.dragPointerId = null;
+      this.text.cursor = 'grab';
+      
+      // Emit moved event for state management
+      this.emit('moved', { x: this.x, y: this.y });
+    }
+  }
+
+  onDragMove(e: PIXI.FederatedPointerEvent): void {
+    if (this.dragging && this.dragPointerId === e.pointerId) {
+      const globalPos = e.global;
+      const localPos = this.parent?.toLocal(globalPos);
+      if (localPos) {
+        this.x = localPos.x - this.dragOffset.x;
+        this.y = localPos.y - this.dragOffset.y;
+        this.text.cursor = 'grabbing';
+      }
+    }
+  }
+
+  // ---- Resizing
+  onResizeStart(e: PIXI.FederatedPointerEvent): void {
+    this.resizing = true;
+    this.resizePointerId = e.pointerId;
+    
+    // Calculate initial distance from center to pointer
+    const globalPos = e.global;
+    const localPos = this.parent?.toLocal(globalPos);
+    if (localPos) {
+      const dx = localPos.x - this.x;
+      const dy = localPos.y - this.y;
+      this.startProj = Math.sqrt(dx * dx + dy * dy);
+      this.startScale = this.text.scale.x;
+
+      // Add global event listeners for resize
+      const stage = this.parent?.parent;
+      if (stage) {
+        stage.on('pointermove', this.boundOnResizeMove);
+        stage.on('pointerup', this.boundOnResizeEnd);
+        stage.on('pointerupoutside', this.boundOnResizeEnd);
+      }
+    }
+  }
+
+  onResizeMove(e: PIXI.FederatedPointerEvent): void {
+    if (this.resizing && this.resizePointerId === e.pointerId) {
+      const globalPos = e.global;
+      const localPos = this.parent?.toLocal(globalPos);
+      if (localPos) {
+        const dx = localPos.x - this.x;
+        const dy = localPos.y - this.y;
+        const currentProj = Math.sqrt(dx * dx + dy * dy);
+        
+        const scaleFactor = currentProj / this.startProj;
+        const newScale = Math.max(0.1, Math.min(5, this.startScale * scaleFactor));
+        
+        this.text.scale.set(newScale);
+        this._redrawFrame();
+      }
+    }
+  }
+
+  onResizeEnd(e: PIXI.FederatedPointerEvent): void {
+    if (this.resizing && this.resizePointerId === e.pointerId) {
+      this.resizing = false;
+      this.resizePointerId = null;
+      
+      // Remove global event listeners
+      const stage = this.parent?.parent;
+      if (stage) {
+        stage.off('pointermove', this.boundOnResizeMove);
+        stage.off('pointerup', this.boundOnResizeEnd);
+        stage.off('pointerupoutside', this.boundOnResizeEnd);
+      }
+      
+      // Emit scaled event for state management
+      this.emit('scaled', { scale: this.text.scale.x });
+    }
+  }
+
+  // ---- Visual feedback
+  showSelection(): void {
+    this.frame.visible = true;
+    this.handle.visible = true;
+  }
+
+  hideSelection(): void {
+    this.frame.visible = false;
+    this.handle.visible = false;
+  }
+
+  getScale(): number {
+    return this.text.scale.x;
+  }
+
+  setScale(scale: number): void {
+    this.text.scale.set(scale);
+    this._redrawFrame();
+  }
+
+  private _redrawFrame(): void {
+    if (!this.text) return;
+    
+    const bounds = this.text.getBounds();
+    const padding = 4;
+    
+    // Selection frame
+    this.frame.clear();
+    this.frame.lineStyle(2, 0x007AFF, 1);
+    this.frame.drawRect(
+      bounds.x - padding,
+      bounds.y - padding,
+      bounds.width + padding * 2,
+      bounds.height + padding * 2
+    );
+    
+    // Corner handle (bottom-right) - positioned relative to the frame
+    this.handle.clear();
+    this.handle.beginFill(0x007AFF);
+    this.handle.drawRect(
+      bounds.x + bounds.width - padding - 2,
+      bounds.y + bounds.height - padding - 2,
+      8,
+      8
+    );
+    this.handle.endFill();
+    
+    // Hide by default
+    this.frame.visible = false;
+    this.handle.visible = false;
+    
+    console.log('Frame redrawn, bounds:', bounds, 'handle at:', bounds.x + bounds.width - padding - 2, bounds.y + bounds.height - padding - 2);
+  }
+}
+
 class DraggableResizable extends PIXI.Container {
   sprite: PIXI.Sprite;
   frame: PIXI.Graphics;
@@ -257,6 +563,16 @@ interface DraggableImage {
   imageUrl: string;
 }
 
+interface DraggableText {
+  id: string;
+  node: DraggableResizableText;
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  fontFamily: string;
+}
+
 interface StoredImageData {
   id: string;
   imageUrl: string;
@@ -265,8 +581,19 @@ interface StoredImageData {
   scale: number;
 }
 
+interface StoredTextData {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+  color: string;
+  fontFamily: string;
+  scale: number;
+}
+
 interface CanvasData {
   images: StoredImageData[];
+  texts: StoredTextData[];
   canvasPosition: {
     x: number;
     y: number;
@@ -283,14 +610,22 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
   const appRef = useRef<PIXI.Application | null>(null);
   const containerRef = useRef<PIXI.Container | null>(null);
   const [images, setImages] = useState<DraggableImage[]>([]);
+  const [texts, setTexts] = useState<DraggableText[]>([]);
   const [selectedImage, setSelectedImage] = useState<DraggableImage | null>(null);
+  const [selectedText, setSelectedText] = useState<DraggableText | null>(null);
+  const [isTyping, setIsTyping] = useState(false);
+  const [typingPosition, setTypingPosition] = useState({ x: 0, y: 0 });
+  const [currentText, setCurrentText] = useState('');
   const selectedImageRef = useRef<DraggableImage | null>(null);
+  const selectedTextRef = useRef<DraggableText | null>(null);
   const saveDebounceRef = useRef<number | null>(null);
   const [showGeminiPrompt, setShowGeminiPrompt] = useState(false);
   const saveToAPIRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const debouncedAutoSaveRef = useRef<() => void>(() => {});
   const handleImageDoubleClickRef = useRef<(imageId: string) => void>(() => {});
   const handleDeleteImageRef = useRef<(imageId: string) => void>(() => {});
+  const handleDeleteTextRef = useRef<(textId: string) => void>(() => {});
+  const createTextElementRef = useRef<(text: string, x: number, y: number) => void>(() => {});
 
 
   const debouncedAutoSave = useCallback(() => {
@@ -299,11 +634,12 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     }
     // Debounce saves to avoid excessive POSTs while interacting
     saveDebounceRef.current = window.setTimeout(() => {
-      if (images.length > 0) {
+      console.log('Auto-save triggered, images:', images.length, 'texts:', texts.length);
+      if (images.length > 0 || texts.length > 0) {
         saveToAPIRef.current?.();
       }
     }, 2000);
-  }, [images.length]);
+  }, [images.length, texts.length]);
 
   // Store currentTool and editorState in refs to avoid recreating the entire canvas
   const currentToolRef = useRef<Tool>(currentTool);
@@ -311,6 +647,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
 
   // Update refs when props change
   useEffect(() => {
+    console.log('Current tool changed to:', currentTool);
     currentToolRef.current = currentTool;
   }, [currentTool]);
 
@@ -345,9 +682,13 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
       container.eventMode = 'static';
 
       container.on('pointerdown', (event) => {
+        console.log('Canvas clicked, current tool:', currentToolRef.current);
         if (currentToolRef.current === 'text') {
+          console.log('Text tool active, starting typing at click position');
           const localPoint = container.toLocal(event.global);
-          addTextAtPosition("Hello World", localPoint.x, localPoint.y, editorStateRef.current);
+          setTypingPosition({ x: localPoint.x, y: localPoint.y });
+          setCurrentText('');
+          setIsTyping(true);
         } else {
             // Only start panning if not clicking on a sprite or handle
             if (event.target === container) {
@@ -360,6 +701,16 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
                 selectedImageRef.current.node.hideSelection();
               }
               setSelectedImage(null);
+              
+              // Deselect text when clicking on empty space
+              setSelectedText(null);
+
+              // If currently typing, finish typing and create text element
+              if (isTyping && currentText.trim()) {
+                createTextElementRef.current?.(currentText.trim(), typingPosition.x, typingPosition.y);
+                setIsTyping(false);
+                setCurrentText('');
+              }
             }
         }
       });
@@ -682,6 +1033,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     if (!containerRef.current) return;
 
     console.log('All images before saving:', images);
+    console.log('All texts before saving:', texts);
     
     const canvasData: CanvasData = {
       images: images.map(img => {
@@ -701,6 +1053,18 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
           scale: img.node?.getScale() || 1
         };
       }).filter((img): img is StoredImageData => img !== null), // Remove null entries
+      texts: texts.map(text => {
+        console.log('Saving text:', text.id, 'content:', text.text, 'font:', text.fontFamily);
+        return {
+          id: text.id,
+          text: text.text,
+          x: text.node?.x || 0,
+          y: text.node?.y || 0,
+          color: text.color,
+          fontFamily: text.fontFamily,
+          scale: text.node?.getScale() || 1
+        };
+      }),
       canvasPosition: {
         x: containerRef.current.x,
         y: containerRef.current.y
@@ -728,7 +1092,7 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     } catch (error) {
       console.error('Error saving canvas data:', error);
     }
-  }, [images, containerRef]);
+  }, [images, texts, containerRef]);
 
   const loadCanvasData = async (canvasData: CanvasData) => {
     // Clear existing images
@@ -739,6 +1103,15 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     });
     setImages([]);
     setSelectedImage(null);
+
+    // Clear existing texts
+    texts.forEach(text => {
+      if (text.node) {
+        text.node.destroy();
+      }
+    });
+    setTexts([]);
+    setSelectedText(null);
 
     // Restore canvas position
     if (containerRef.current && canvasData.canvasPosition) {
@@ -849,6 +1222,122 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     }
     
     setImages(loadedImages);
+
+    // Load texts
+    const loadedTexts: DraggableText[] = [];
+    for (const storedText of canvasData.texts || []) {
+      try {
+        if (!storedText.text) {
+          console.warn('Skipping text with no content:', storedText.id);
+          continue;
+        }
+
+        // Load Google Font if needed
+        let fontFamily = storedText.fontFamily || editorState.fontFamily;
+        if (fontFamily !== 'Roboto' && fontFamily !== 'Arial' && fontFamily !== 'Helvetica') {
+          try {
+            // Load Google Font
+            const fontUrl = `https://fonts.googleapis.com/css2?family=${fontFamily.replace(/\s+/g, '+')}:wght@400&display=swap`;
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = fontUrl;
+            document.head.appendChild(link);
+          } catch (error) {
+            console.warn('Failed to load Google Font:', fontFamily, error);
+            fontFamily = 'Arial'; // Fallback
+          }
+        }
+
+        // Create DraggableResizableText
+        const textNode = new DraggableResizableText(
+          storedText.text, 
+          storedText.id, 
+          fontFamily, 
+          storedText.color || editorState.color
+        );
+        textNode.x = storedText.x;
+        textNode.y = storedText.y;
+        if (storedText.scale) {
+          textNode.setScale(storedText.scale);
+        }
+
+        // Add click handler for selection after text is created
+        const addClickHandler = () => {
+          if (textNode.text) {
+            textNode.text.on('pointerdown', (event) => {
+              event.stopPropagation();
+              
+              // Clear previous selections
+              if (selectedImage) {
+                selectedImage.node.hideSelection();
+                setSelectedImage(null);
+              }
+              if (selectedText) {
+                selectedText.node.hideSelection();
+                setSelectedText(null);
+              }
+
+              // Show selection for this text
+              textNode.showSelection();
+
+              // Select this text
+              setSelectedText({
+                id: storedText.id,
+                node: textNode,
+                x: textNode.x,
+                y: textNode.y,
+                text: storedText.text,
+                color: storedText.color,
+                fontFamily: storedText.fontFamily
+              });
+            });
+            
+            // Add event listeners for state management
+            textNode.on('moved', ({ x, y }: { x: number; y: number }) => {
+              console.log('Loaded text moved:', storedText.id, 'to', x, y);
+              setTexts(prev => prev.map(t => t.id === storedText.id ? { ...t, x, y } : t));
+              setSelectedText(st => st && st.id === storedText.id ? { ...st, x, y } : st);
+              debouncedAutoSaveRef.current?.();
+            });
+            
+            textNode.on('scaled', ({ scale }: { scale: number }) => {
+              console.log('Loaded text scaled:', storedText.id, 'to', scale);
+              setTexts(prev => prev.map(t => t.id === storedText.id ? { ...t, scale } : t));
+              setSelectedText(st => st && st.id === storedText.id ? { ...st, scale } : st);
+              debouncedAutoSaveRef.current?.();
+            });
+          } else {
+            // Retry after a short delay if text isn't ready yet
+            setTimeout(addClickHandler, 100);
+          }
+        };
+        
+        // Start trying to add the click handler
+        addClickHandler();
+
+        // Add to container
+        if (containerRef.current) {
+          containerRef.current.addChild(textNode);
+        }
+
+        // Add to state
+        const newText: DraggableText = {
+          id: storedText.id,
+          node: textNode,
+          x: textNode.x,
+          y: textNode.y,
+          text: storedText.text,
+          color: storedText.color,
+          fontFamily: storedText.fontFamily
+        };
+
+        loadedTexts.push(newText);
+      } catch (error) {
+        console.error('Error loading text:', storedText.id, error);
+      }
+    }
+    
+    setTexts(loadedTexts);
   };
 
   const importFromJSON = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1121,14 +1610,161 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
     debouncedAutoSaveRef.current?.();
   }, [images, selectedImage]);
 
+  // Handle deleting text
+  const handleDeleteText = useCallback((textId: string) => {
+    // Remove from PixiJS container
+    const textToDelete = texts.find(text => text.id === textId);
+    if (textToDelete?.node && containerRef.current) {
+      containerRef.current.removeChild(textToDelete.node);
+      textToDelete.node.destroy();
+    }
+
+    // Remove from texts state
+    setTexts(prevTexts => prevTexts.filter(text => text.id !== textId));
+
+    // Clear selection if this text was selected
+    if (selectedText?.id === textId) {
+      setSelectedText(null);
+    }
+
+    // Auto-save after deletion
+    debouncedAutoSaveRef.current?.();
+  }, [texts, selectedText]);
+
+  // Create text element
+  const createTextElement = useCallback(async (text: string, x: number, y: number) => {
+    console.log('createTextElement called with:', { text, x, y });
+    if (!containerRef.current) {
+      console.log('No container ref, returning early');
+      return;
+    }
+
+    const textId = Date.now().toString();
+    console.log('Creating text with ID:', textId);
+    
+    // Load Google Font if needed
+    let fontFamily = editorState.fontFamily;
+    if (fontFamily !== 'Roboto' && fontFamily !== 'Arial' && fontFamily !== 'Helvetica' && fontFamily !== 'Times New Roman') {
+      try {
+        // Check if font is already loaded
+        const existingLink = document.querySelector(`link[href*="${fontFamily.replace(/\s+/g, '+')}"]`);
+        if (!existingLink) {
+          // Load Google Font
+          const fontUrl = `https://fonts.googleapis.com/css2?family=${fontFamily.replace(/\s+/g, '+')}:wght@400&display=swap`;
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = fontUrl;
+          document.head.appendChild(link);
+          
+          // Wait longer for font to load
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } catch (error) {
+        console.warn('Failed to load Google Font:', fontFamily, error);
+        fontFamily = 'Arial'; // Fallback
+      }
+    }
+    
+    // Create DraggableResizableText
+    console.log('Creating text with font:', fontFamily, 'color:', editorState.color);
+    const textNode = new DraggableResizableText(text, textId, fontFamily, editorState.color);
+    textNode.x = x;
+    textNode.y = y;
+
+    // Add click handler for selection after text is created
+    const addClickHandler = () => {
+      if (textNode.text) {
+        textNode.text.on('pointerdown', (event) => {
+          event.stopPropagation();
+          
+          // Clear previous selections
+          if (selectedImage) {
+            selectedImage.node.hideSelection();
+            setSelectedImage(null);
+          }
+          if (selectedText) {
+            selectedText.node.hideSelection();
+            setSelectedText(null);
+          }
+
+          // Show selection for this text
+          textNode.showSelection();
+
+          // Select this text
+          setSelectedText({
+            id: textId,
+            node: textNode,
+            x: textNode.x,
+            y: textNode.y,
+            text: text,
+            color: editorState.color,
+            fontFamily: editorState.fontFamily
+          });
+        });
+        
+        // Add event listeners for state management
+        textNode.on('moved', ({ x, y }: { x: number; y: number }) => {
+          console.log('Text moved:', textId, 'to', x, y);
+          setTexts(prev => prev.map(t => t.id === textId ? { ...t, x, y } : t));
+          setSelectedText(st => st && st.id === textId ? { ...st, x, y } : st);
+          debouncedAutoSaveRef.current?.();
+        });
+        
+        textNode.on('scaled', ({ scale }: { scale: number }) => {
+          console.log('Text scaled:', textId, 'to', scale);
+          setTexts(prev => prev.map(t => t.id === textId ? { ...t, scale } : t));
+          setSelectedText(st => st && st.id === textId ? { ...st, scale } : st);
+          debouncedAutoSaveRef.current?.();
+        });
+      } else {
+        // Retry after a short delay if text isn't ready yet
+        setTimeout(addClickHandler, 100);
+      }
+    };
+    
+    // Start trying to add the click handler
+    addClickHandler();
+
+    // Add to container
+    containerRef.current.addChild(textNode);
+    console.log('Text added to container at position:', textNode.x, textNode.y);
+
+    // Add to state
+    const newText: DraggableText = {
+      id: textId,
+      node: textNode,
+      x: textNode.x,
+      y: textNode.y,
+      text: text,
+      color: editorState.color,
+      fontFamily: editorState.fontFamily
+    };
+
+    console.log('Adding text to state:', newText);
+    setTexts(prevTexts => {
+      const updated = [...prevTexts, newText];
+      console.log('Updated texts state:', updated);
+      console.log('Total texts now:', updated.length);
+      return updated;
+    });
+    
+    // Auto-save
+    console.log('Calling auto-save after text creation');
+    console.log('Current texts count:', texts.length + 1);
+    debouncedAutoSaveRef.current?.();
+  }, [editorState, selectedImage, selectedText]);
+
   // Keep refs in sync
   useEffect(() => {
     selectedImageRef.current = selectedImage;
+    selectedTextRef.current = selectedText;
     saveToAPIRef.current = saveToAPI;
     debouncedAutoSaveRef.current = debouncedAutoSave;
     handleImageDoubleClickRef.current = handleImageDoubleClick;
     handleDeleteImageRef.current = handleDeleteImage;
-  }, [selectedImage, saveToAPI, debouncedAutoSave, handleImageDoubleClick, handleDeleteImage]);
+    handleDeleteTextRef.current = handleDeleteText;
+    createTextElementRef.current = createTextElement;
+  }, [selectedImage, selectedText, saveToAPI, debouncedAutoSave, handleImageDoubleClick, handleDeleteImage, handleDeleteText, createTextElement]);
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -1139,21 +1775,98 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
         return;
       }
 
-      // Handle Delete/Backspace key to delete selected image
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedImage && !showGeminiPrompt) {
-        event.preventDefault();
-        handleDeleteImageRef.current?.(selectedImage.id);
+      // Handle Delete/Backspace key to delete selected image or text
+      if ((event.key === 'Delete' || event.key === 'Backspace') && !showGeminiPrompt) {
+        if (selectedImage) {
+          event.preventDefault();
+          handleDeleteImageRef.current?.(selectedImage.id);
+        } else if (selectedText) {
+          event.preventDefault();
+          handleDeleteTextRef.current?.(selectedText.id);
+        }
+      }
+
+      // Handle T key to start typing
+      if (event.key === 't' || event.key === 'T') {
+        if (!showGeminiPrompt && !isTyping) {
+          event.preventDefault();
+          // Start typing at center of viewport
+          const centerX = containerRef.current ? -containerRef.current.x + window.innerWidth / 2 : window.innerWidth / 2;
+          const centerY = containerRef.current ? -containerRef.current.y + window.innerHeight / 2 : window.innerHeight / 2;
+          setTypingPosition({ x: centerX, y: centerY });
+          setCurrentText('');
+          setIsTyping(true);
+        }
+      }
+
+      // Handle typing when in typing mode
+      if (isTyping) {
+        if (event.key === 'Enter') {
+          // Finish typing and create text element
+          if (currentText.trim()) {
+            createTextElementRef.current?.(currentText.trim(), typingPosition.x, typingPosition.y);
+          }
+          setIsTyping(false);
+          setCurrentText('');
+        } else if (event.key === 'Escape') {
+          // Cancel typing
+          setIsTyping(false);
+          setCurrentText('');
+        } else if (event.key === 'Backspace') {
+          // Handle backspace
+          setCurrentText(prev => prev.slice(0, -1));
+        } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+          // Add character to current text
+          setCurrentText(prev => prev + event.key);
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showGeminiPrompt, selectedImage]);
+  }, [showGeminiPrompt, selectedImage, selectedText, isTyping, currentText]);
+
+  // Handle clicking outside to finish typing
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (isTyping && currentText.trim()) {
+        // Check if click is on empty canvas space
+        const target = event.target as HTMLElement;
+        const canvasElement = target.closest('.canvas-container');
+        
+        // If clicking on the canvas container itself (empty space), finish typing
+        if (canvasElement && canvasElement === target) {
+          console.log('Clicking outside text preview, finishing typing');
+          createTextElementRef.current?.(currentText.trim(), typingPosition.x, typingPosition.y);
+          setIsTyping(false);
+          setCurrentText('');
+        }
+      }
+    };
+
+    if (isTyping) {
+      // Add a small delay to avoid immediate triggering
+      const timeoutId = setTimeout(() => {
+        document.addEventListener('mousedown', handleClickOutside);
+      }, 100);
+      
+      return () => {
+        clearTimeout(timeoutId);
+        document.removeEventListener('mousedown', handleClickOutside);
+      };
+    }
+  }, [isTyping, currentText, typingPosition]);
 
   return (
-    <div className="w-full h-screen relative">
+    <div className="w-full h-screen relative canvas-container">
       {/* Control buttons */}
       <div className="absolute top-4 right-4 z-50 flex gap-2">
+        {/* Typing indicator */}
+        {isTyping && (
+          <div className="bg-blue-500 text-white px-3 py-1 rounded text-sm">
+            Typing mode - Press Enter to finish
+          </div>
+        )}
         <button 
           onClick={() => setShowGeminiPrompt(true)}
           className="bg-purple-500 text-white px-3 py-1 rounded text-sm"
@@ -1195,6 +1908,36 @@ export default function InfiniteCanvas({ currentTool, editorState }: InfiniteCan
           onImageUpdated={handleGeminiImageUpdated}
           onClose={() => setShowGeminiPrompt(false)}
         />
+      )}
+
+      {/* Live Text Preview */}
+      {isTyping && (
+        <div 
+          className="fixed z-50 pointer-events-none"
+          style={{
+            left: `${typingPosition.x + (containerRef.current?.x || 0)}px`,
+            top: `${typingPosition.y + (containerRef.current?.y || 0)}px`,
+            transform: 'translate(-50%, -50%)',
+            fontFamily: `"${editorState.fontFamily}", Arial, sans-serif`,
+            color: editorState.color,
+            fontSize: '24px',
+            fontWeight: 'normal',
+            textShadow: '1px 1px 2px rgba(0,0,0,0.5)',
+            backgroundColor: 'rgba(255,255,255,0.9)',
+            padding: '4px 8px',
+            borderRadius: '4px',
+            border: '2px solid #007AFF',
+            minWidth: '20px',
+            minHeight: '24px',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          {currentText || 'Type here...'}
+          <div 
+            className="inline-block w-0.5 h-6 bg-current animate-pulse ml-1"
+            style={{ animationDuration: '1s' }}
+          />
+        </div>
       )}
     </div>
   );
